@@ -20,24 +20,6 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.powermock.api.mockito.PowerMockito.mock;
 import static org.powermock.api.mockito.PowerMockito.when;
 
-import com.example.functions.CorsEnabled;
-import com.example.functions.EnvVars;
-import com.example.functions.ExecutionCount;
-import com.example.functions.FileSystem;
-import com.example.functions.FirebaseAuth;
-import com.example.functions.HelloBackground;
-import com.example.functions.HelloGcs;
-import com.example.functions.HelloHttp;
-import com.example.functions.HelloPubSub;
-import com.example.functions.HelloWorld;
-import com.example.functions.LazyFields;
-import com.example.functions.LogHelloWorld;
-import com.example.functions.ParseContentType;
-import com.example.functions.PubSubMessage;
-import com.example.functions.RetrieveLogs;
-import com.example.functions.Scopes;
-import com.example.functions.SendHttpRequest;
-import com.example.functions.StackdriverLogging;
 import com.google.cloud.functions.HttpRequest;
 import com.google.cloud.functions.HttpResponse;
 import com.google.common.testing.TestLogHandler;
@@ -51,10 +33,13 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.contrib.java.lang.system.EnvironmentVariables;
@@ -74,6 +59,12 @@ public class SnippetsTests {
   private static final Logger GCS_LOGGER = Logger.getLogger(HelloGcs.class.getName());
   private static final Logger STACKDRIVER_LOGGER = Logger.getLogger(
       StackdriverLogging.class.getName());
+  private static final Logger FIRESTORE_LOGGER = Logger.getLogger(
+      FirebaseFirestore.class.getName());
+  private static final Logger RTDB_LOGGER = Logger.getLogger(FirebaseRtdb.class.getName());
+  private static final Logger REMOTE_CONFIG_LOGGER = Logger.getLogger(
+      FirebaseRemoteConfig.class.getName());
+  private static final Logger AUTH_LOGGER = Logger.getLogger(FirebaseAuth.class.getName());
 
   private static final TestLogHandler logHandler = new TestLogHandler();
 
@@ -83,13 +74,20 @@ public class SnippetsTests {
   @Rule
   public EnvironmentVariables environmentVariables = new EnvironmentVariables();
 
-  @Before
-  public void beforeTest() throws IOException {
+  @BeforeClass
+  public static void beforeClass() {
     BACKGROUND_LOGGER.addHandler(logHandler);
     PUBSUB_LOGGER.addHandler(logHandler);
     GCS_LOGGER.addHandler(logHandler);
     STACKDRIVER_LOGGER.addHandler(logHandler);
+    FIRESTORE_LOGGER.addHandler(logHandler);
+    RTDB_LOGGER.addHandler(logHandler);
+    REMOTE_CONFIG_LOGGER.addHandler(logHandler);
+    AUTH_LOGGER.addHandler(logHandler);
+  }
 
+  @Before
+  public void beforeTest() throws IOException {
     request = mock(HttpRequest.class);
     response = mock(HttpResponse.class);
 
@@ -100,16 +98,12 @@ public class SnippetsTests {
     writerOut = new BufferedWriter(responseOut);
     when(response.getWriter()).thenReturn(writerOut);
 
-    // Use the same logging handler for all tests
-    Logger.getLogger(HelloBackground.class.getName()).addHandler(logHandler);
-    Logger.getLogger(HelloPubSub.class.getName()).addHandler(logHandler);
-    Logger.getLogger(HelloGcs.class.getName()).addHandler(logHandler);
+    logHandler.clear();
   }
 
   @After
   public void afterTest() {
     System.setOut(null);
-    logHandler.flush();
   }
 
   @Test
@@ -294,7 +288,122 @@ public class SnippetsTests {
   }
 
   @Test
-  public void firebaseAuth() throws IOException {
-    new FirebaseAuth().accept("{\"foo\": \"bar\"}", null);
+  public void firebaseFirestore_shouldIgnoreMissingValues() throws IOException {
+    MockContext context = new MockContext();
+    context.resource = "resource_1";
+    context.eventType = "event_type_2";
+
+    new FirebaseFirestore().accept("", context);
+
+    List<LogRecord> logs = logHandler.getStoredLogRecords();
+    assertThat(logs.size()).isEqualTo(2);
+    assertThat(logs.get(0).getMessage()).isEqualTo("Function triggered by event on: resource_1");
+    assertThat(logs.get(1).getMessage()).isEqualTo("Event type: event_type_2");
+  }
+
+  @Test
+  public void firebaseFirestore_shouldProcessPresentValues() throws IOException {
+    String jsonStr = "{\"oldValue\": 999, \"value\": 777 }";
+
+    MockContext context = new MockContext();
+    context.resource = "resource_1";
+    context.eventType = "event_type_2";
+
+    new FirebaseFirestore().accept(jsonStr, context);
+
+    List<LogRecord> logs = logHandler.getStoredLogRecords();
+    assertThat(logs.size()).isEqualTo(6);
+    assertThat(logs.get(0).getMessage()).isEqualTo("Function triggered by event on: resource_1");
+    assertThat(logs.get(1).getMessage()).isEqualTo("Event type: event_type_2");
+    assertThat(logs.get(2).getMessage()).isEqualTo("Old value:");
+    assertThat(logs.get(4).getMessage()).isEqualTo("New value:");
+  }
+
+  @Test
+  public void firebaseRtdb_shouldDefaultAdminToZero() throws IOException {
+    MockContext context = new MockContext();
+    context.resource = "resource_1";
+
+    new FirebaseRtdb().accept("", context);
+
+    List<LogRecord> logs = logHandler.getStoredLogRecords();
+    assertThat(logs.get(0).getMessage()).isEqualTo("Function triggered by change to: resource_1");
+    assertThat(logs.get(1).getMessage()).isEqualTo("Admin?: false");
+  }
+
+  @Test
+  public void firebaseRtdb_shouldDisplayAdminStatus() throws IOException {
+    String jsonStr = "{\"auth\": { \"admin\": true }}";
+
+    MockContext context = new MockContext();
+    context.resource = "resource_1";
+    context.eventType = "event_type_2";
+
+    new FirebaseRtdb().accept(jsonStr, context);
+
+    List<LogRecord> logs = logHandler.getStoredLogRecords();
+    assertThat(logs.get(0).getMessage()).isEqualTo("Function triggered by change to: resource_1");
+    assertThat(logs.get(1).getMessage()).isEqualTo("Admin?: true");
+  }
+
+  @Test
+  public void firebaseRtdb_shouldShowDelta() throws IOException {
+    String jsonStr = "{\"delta\": { \"value\": 2 }}";
+
+    MockContext context = new MockContext();
+    context.resource = "resource_1";
+    context.eventType = "event_type_2";
+
+    new FirebaseRtdb().accept(jsonStr, context);
+
+    List<LogRecord> logs = logHandler.getStoredLogRecords();
+    assertThat(logs.size()).isEqualTo(4);
+    assertThat(logs.get(0).getMessage()).isEqualTo("Function triggered by change to: resource_1");
+    assertThat(logs.get(2).getMessage()).isEqualTo("Delta:");
+    assertThat(logs.get(3).getMessage()).isEqualTo("{\"value\":2}");
+  }
+
+  @Test
+  public void firebaseRemoteConfig_shouldShowUpdateType() throws IOException {
+    new FirebaseRemoteConfig().accept("{\"updateType\": \"foo\"}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo("Update type: foo");
+  }
+
+  @Test
+  public void firebaseRemoteConfig_shouldShowOrigin() throws IOException {
+    new FirebaseRemoteConfig().accept("{\"updateOrigin\": \"foo\"}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo("Origin: foo");
+  }
+
+  @Test
+  public void firebaseRemoteConfig_shouldShowVersion() throws IOException {
+    new FirebaseRemoteConfig().accept("{\"versionNumber\": 2}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo("Version: 2");
+  }
+
+  @Test
+  public void firebaseAuth_shouldShowUserId() throws IOException {
+    new FirebaseAuth().accept("{\"uid\": \"foo\"}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo(
+        "Function triggered by change to user: foo");
+  }
+
+  @Test
+  public void firebaseAuth_shouldShowOrigin() throws IOException {
+    new FirebaseAuth().accept("{\"metadata\": {\"createdAt\": \"123\"}}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo("Created at: 123");
+  }
+
+  @Test
+  public void firebaseAuth_shouldShowVersion() throws IOException {
+    new FirebaseAuth().accept("{\"email\": \"foo@google.com\"}", null);
+
+    assertThat(logHandler.getStoredLogRecords().get(0).getMessage()).isEqualTo(
+        "Email: foo@google.com");
   }
 }
